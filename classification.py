@@ -35,7 +35,6 @@ from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import CubicHermiteSpline
 from xgboost import XGBClassifier
 
-### testing that push works
 
 #create lables dictionary:
 tabular_data = pd.read_csv(r'/sise/home/mayaroz/ann_db.csv')
