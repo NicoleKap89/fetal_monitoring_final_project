@@ -15,8 +15,16 @@ def process_signal(file_path, masking_rate_pct, random_selection):
     data = pd.read_csv(file_path)  # df
     timestamps = data['seconds'].values  # ndarray
     fhr = data['FHR'].values  # ndarray
+
     # Replace zeros with NaN
     fhr = np.where(fhr == 0, np.nan, fhr)  # ndarray
+ 
+    null_rate = np.mean(np.isnan(fhr)) * 100  # Percentage of NaN values in fhr
+    
+    # if null_rate > 44: #95 quantile
+    #     print(file_path)
+    #     return None
+    
     original_fhr = copy.copy(fhr) #without masking nulls
     # Identify valid indices
     valid_indices = np.where(~np.isnan(fhr))[0]  # Indices where FHR is not NaN
@@ -76,7 +84,7 @@ def process_signal(file_path, masking_rate_pct, random_selection):
     missing_indices = hermite_fhr['FHR'].isna()
     missing_timestamps = hermite_fhr.loc[missing_indices, 'seconds'].values
     known_derivatives = calculate_derivatives(known_timestamps, known_values)
-    hermite_spline = CubicHermiteSpline(known_timestamps, known_values, known_derivatives)
+    hermite_spline = CubicHermiteSpline(known_timestamps, known_values, known_derivatives,extrapolate='periodic')
     hermite_interpolated = hermite_spline(missing_timestamps)
     hermite_fhr.loc[missing_indices, 'FHR'] = hermite_interpolated
     hermite_interpolated = hermite_fhr['FHR']
@@ -125,7 +133,8 @@ def process_zip(zip_path, masking_rate_pct, random_selection):
                     try:
                         # Process the signal
                         result = process_signal(file_path, masking_rate_pct, random_selection)
-                        results.append(result)
+                        if result != None:
+                            results.append(result)
                     except Exception as e:
                         print(f"Error processing {file_path}: {e}")
 
@@ -246,6 +255,8 @@ final_df.columns = [' '.join(col).strip() for col in final_df.columns.values]
 
 # Reset the index for a cleaner look
 final_df.reset_index(inplace=True)
+
+final_df = final_df.round(2)
 
 # Display the final structured DataFrame
 print(final_df)
