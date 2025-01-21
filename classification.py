@@ -36,6 +36,7 @@ from scipy.interpolate import CubicHermiteSpline
 from xgboost import XGBClassifier
 
 
+
 #create lables dictionary:
 tabular_data = pd.read_csv(r'/sise/home/mayaroz/ann_db.csv')
 data = tabular_data.T
@@ -98,7 +99,7 @@ def process_signal(file_path, interpolation_type="linear", fill_method="interpol
             missing_indices = data['FHR'].isna()
             missing_timestamps = data.loc[missing_indices, 'seconds'].values
             known_derivatives = calculate_derivatives(known_timestamps, known_values)
-            hermite_spline = CubicHermiteSpline(known_timestamps, known_values, known_derivatives)
+            hermite_spline = CubicHermiteSpline(known_timestamps, known_values, known_derivatives,extrapolate='periodic')
             hermite_interpolated = hermite_spline(missing_timestamps)
             data.loc[missing_indices, 'FHR'] = hermite_interpolated
 
