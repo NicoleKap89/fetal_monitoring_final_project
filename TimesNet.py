@@ -16,33 +16,35 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-
-# padding to max series length - 21,600 timestamps (90 min)
-def process_signal(file_path, window_size):
+#padding to max series length - 21,620 timestamps (90 min)
+def process_signal(file_path):
     # Read CSV and extract the FHR column (or any other columns you need)
     df = pd.read_csv(file_path)
     # Assuming the FHR data is in a column named "FHR"
     fhr_data = df["FHR"].values
-    length = len(fhr_data)  # length of each file
+    length = len(fhr_data) #length of each file
     file_id = os.path.basename(file_path)  # Extract the file name or any other identifier
 
     if length > 21620:
         valid_segments = fhr_data[:21620]
     else:
-        # Pad the signal with NaNs or zeros if it's shorter than 21,620 timestamps
+    # Pad the signal with NaNs or zeros if it's shorter than 21,620 timestamps
         padding = np.full((21620 - length,), np.nan)  # Use np.nan for missing values or np.zeros for zero padding
     valid_segments = np.concatenate([fhr_data, padding])
     # Replace 0 values in the data with NaN for further processing
     valid_segments = np.where(valid_segments == 0, np.nan, valid_segments)
     # valid_segments = fhr_data[0:14400]
-    return valid_segments, file_id, length
+    return valid_segments, file_id , length
 
 
-def process_zip(zip_path, window_size):
+
+
+def process_zip(zip_path):
     results = []
     temp_dir = "extracted"  # Temporary directory to extract files
     minimum_len = np.inf
     maximum_len = -np.inf
+
 
     with zipfile.ZipFile(zip_path, 'r') as z:
         # Extract all files to the temporary directory
@@ -58,7 +60,7 @@ def process_zip(zip_path, window_size):
                     file_path = os.path.join(root, file)
                     try:
                         # Call the process_signal function to extract valid segments
-                        valid_segments, file_id, length = process_signal(file_path, window_size)
+                        valid_segments, file_id,length = process_signal(file_path)
                         if length <= minimum_len:
                             minimum_len = length
                         if length >= maximum_len:
@@ -66,9 +68,9 @@ def process_zip(zip_path, window_size):
                         # Loop through the valid segments and extract the desired information
                         # for segment in valid_segments:
                         result = pd.DataFrame({
-                            "file_id": file_id,
+                            "file_id": file_id ,
                             "fhr": valid_segments
-                        })
+                         })
                         results.append(result)
 
                     except Exception as e:
@@ -83,13 +85,15 @@ def process_zip(zip_path, window_size):
     os.makedirs('generate_data', exist_ok=True)
     final_df.to_csv(f'generate_data/timesnet_df.csv', index=False)
 
+    
     # Clean up temporary directory
     for root, _, files in os.walk(temp_dir, topdown=False):
         for file in files:
             os.remove(os.path.join(root, file))
         os.rmdir(root)
-    # print(f'max len file: {maximum_len}') # 21620
+    print(f'max len file: {maximum_len}') # 21620
     return final_df
+
 
 
 def introduce_missing_values(X, rate, pattern):
@@ -103,16 +107,15 @@ def introduce_missing_values(X, rate, pattern):
         raise ValueError(f"Unknown missingness pattern: {pattern}")
 
 
-# padding
-# normalization
+#padding
+#normalization 
 # Main block to execute
 if __name__ == "__main__":
-    zip_file_path = r'/home/nicoleka/fhr_project/Time-Series-Library/signals.zip'
-    window_size = 3600
-    process_zip(zip_file_path, window_size)
+    zip_file_path = r'/sise/home/mayaroz/signals.zip'
+    process_zip(zip_file_path)
     df = pd.read_csv('generate_data/timesnet_df.csv')
 
-    # only fhr:
+    #only fhr:
     df = df[['fhr']]
 
     # Define the sequence length and reshape
@@ -124,7 +127,7 @@ if __name__ == "__main__":
     reshaped_data = df['fhr'].values[:n_samples * sequence_length].reshape(n_samples, sequence_length, n_features)
     print(f"Reshaped data: {reshaped_data}")
     print(f"Reshaped data shape: {reshaped_data.shape}")
-    # Example output: (484, 3600, 1)
+
 
     # Split the reshaped data into train (70%), validation (15%), and test (15%)
     train_data, temp_data = train_test_split(reshaped_data, test_size=0.3, random_state=42)
@@ -134,9 +137,10 @@ if __name__ == "__main__":
     print(f"Validation shape: {val_data.shape}")
     print(f"Test shape: {test_data.shape}")
 
+
     # Introduce missing values in validation and test sets
-    val_data_with_missing = introduce_missing_values(val_data, rate=0.1, pattern="point")
-    test_data_with_missing = introduce_missing_values(test_data, rate=0.1, pattern="point")
+    val_data_with_missing = introduce_missing_values(val_data, rate=0.1,pattern="point")
+    test_data_with_missing = introduce_missing_values(test_data, rate=0.1,pattern="point")
 
     # Prepare training, validation, and testing dictionaries
     train_set = {"X": train_data}
@@ -144,29 +148,30 @@ if __name__ == "__main__":
     test_set = {"X": test_data_with_missing}
 
     # Mask for testing (optional for metric calculation)
-    test_X_indicating_mask = np.isnan(test_data) ^ np.isnan(
-        test_data_with_missing)  # xor - true only for null that were added in masking (not initiall nulls)
+    test_X_indicating_mask = np.isnan(test_data) ^ np.isnan(test_data_with_missing) #xor - true only for null that were added in masking (not initiall nulls)
     test_X_ori = np.nan_to_num(test_data)  # Replace NaNs with 0 for metrics
+
+
 
     # Initialize the model
     timesnet = TimesNet(
-        n_steps=21620,  # Sequence length (number of timestamps per sample)
-        n_features=1,  # Number of features (1 for FHR)
-        n_layers=2,  # Number of layers in the model
-        top_k=2,  # Top K imputation strategy
-        d_model=128,  # Dimension of the model (e.g., embedding size)
-        d_ffn=512,  # Dimension of the feedforward network
-        n_kernels=5,  # Number of kernels in the convolution layers
-        dropout=0.5,  # Dropout rate to prevent overfitting
-        apply_nonstationary_norm=False,  # Whether to apply non-stationary normalization
-        batch_size=32,  # Batch size for training
-        epochs=25,  # Number of epochs for training
-        patience=3,  # Patience for early stopping
-        optimizer=Adam(lr=1e-3),  # Optimizer (Adam with learning rate 0.001)
-        num_workers=0,  # Number of workers for data loading
-        device=None,  # Device (None for automatic selection)
-        saving_path="tutorial_results/imputation/timesnet",  # Path to save results
-        model_saving_strategy="best",  # Save only the best model
+        n_steps=21620,                # Sequence length (number of timestamps per sample)
+        n_features=1,                # Number of features (1 for FHR)
+        n_layers=2,                  # Number of layers in the model
+        top_k=1,                     # Top K imputation strategy
+        d_model=128,                 # Dimension of the model (e.g., embedding size)
+        d_ffn=512,                   # Dimension of the feedforward network
+        n_kernels=5,                 # Number of kernels in the convolution layers
+        dropout=0.5,                 # Dropout rate to prevent overfitting
+        apply_nonstationary_norm=False, # Whether to apply non-stationary normalization
+        batch_size=32,               # Batch size for training
+        epochs=15,                   # Number of epochs for training
+        patience=3,                  # Patience for early stopping
+        optimizer=Adam(lr=1e-3),     # Optimizer (Adam with learning rate 0.001)
+        num_workers=0,               # Number of workers for data loading
+        device=None,                 # Device (None for automatic selection)
+        saving_path="tutorial_results/imputation/timesnet", # Path to save results
+        model_saving_strategy="best", # Save only the best model
     )
 
     # # Train the model
@@ -177,8 +182,13 @@ if __name__ == "__main__":
     timesnet_imputation = timesnet_results["imputation"]
 
     # Masked MAE calculation (ignoring missing values)
+    testing_mae = mean_absolute_error(test_X_ori[test_X_indicating_mask], timesnet_imputation[test_X_indicating_mask])
+    print(f"Testing mean absolute error: {testing_mae:.4f}")
     testing_mse = mean_squared_error(test_X_ori[test_X_indicating_mask], timesnet_imputation[test_X_indicating_mask])
     print(f"Testing mean squared error: {testing_mse:.4f}")
+
+
+
 
     # # Load the TensorBoard log directory
     # log_dir  = "/sise/home/mayaroz/tutorial_results/imputation/timesnet/20250115_T163305/tensorboard/events.out.tfevents.1736951585.ise-6000-02.2211022.0.pypots"
@@ -213,7 +223,14 @@ if __name__ == "__main__":
     # plt.legend()
     # plt.savefig(f'plots/training.jpg', format='jpg', dpi=300)  # Save as JPG
 
-#####################example
+
+
+
+
+
+
+
+#####################example 
 # set_random_seed()
 # Load the dataset
 # # Load the PhysioNet-2012 dataset
