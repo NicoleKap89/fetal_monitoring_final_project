@@ -165,7 +165,7 @@ if __name__ == "__main__":
         dropout=0.5,                 # Dropout rate to prevent overfitting
         apply_nonstationary_norm=False, # Whether to apply non-stationary normalization
         batch_size=32,               # Batch size for training
-        epochs=15,                   # Number of epochs for training
+        epochs=50,                   # Number of epochs for training
         patience=3,                  # Patience for early stopping
         optimizer=Adam(lr=1e-3),     # Optimizer (Adam with learning rate 0.001)
         num_workers=0,               # Number of workers for data loading
