@@ -1,266 +1,413 @@
-import zipfile
 import os
+import ast
+import gc
+import itertools
+import random
+import zipfile
+import shutil
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from pypots.data import load_specific_dataset
-from pypots.optim import Adam
-from pypots.imputation import TimesNet
-from pypots.utils.metrics import calc_mae
-import numpy as np
-import benchpots
-from pypots.utils.random import set_random_seed
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from pygrinder import mcar, seq_missing, block_missing
-import matplotlib.pyplot as plt
 import tensorflow as tf
-import matplotlib.pyplot as plt
+import torch
 
-#padding to max series length - 21,620 timestamps (90 min)
-def process_signal(file_path):
-    # Read CSV and extract the FHR column (or any other columns you need)
+from sklearn.impute import KNNImputer
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split
+
+# pypots imports (make sure these libraries are installed and available)
+from pypots.data import load_specific_dataset
+from pypots.imputation import SAITS, TimesNet
+from pypots.optim import Adam
+from pypots.utils.metrics import calc_mae
+from pypots.utils.random import set_random_seed
+
+import benchpots
+from pygrinder import block_missing, mcar, seq_missing
+
+# =============================================================================
+# Function to extract sliding windows from a single CSV file
+# =============================================================================
+def process_signal_sliding_window(file_path, window_size=2000, stride=2000//2):
+    """
+    Process a single CSV file to extract sliding windows.
+    Each returned window is a tuple (window, file_id, start_index).
+    """
+    import numpy as np
+    import pandas as pd
+
+    # Read CSV file and extract the FHR column
     df = pd.read_csv(file_path)
-    # Assuming the FHR data is in a column named "FHR"
-    fhr_data = df["FHR"].values
-    length = len(fhr_data) #length of each file
-    file_id = os.path.basename(file_path)  # Extract the file name or any other identifier
-
-    if length > 21620:
-        valid_segments = fhr_data[:21620]
+    fhr_data = df["FHR"].values.astype(float)
+    
+    # Replace zeroes with NaN (if zero indicates missing data)
+    fhr_data[fhr_data == 0] = np.nan
+    
+    file_id = os.path.basename(file_path)
+    windows = []
+    
+    # Only process the file if its length is at least the window size
+    if len(fhr_data) >= window_size:
+        for start in range(0, len(fhr_data) - window_size + 1, stride):
+            window = fhr_data[start:start + window_size]
+            windows.append((window, file_id, start))
     else:
-    # Pad the signal with NaNs or zeros if it's shorter than 21,620 timestamps
-        padding = np.full((21620 - length,), np.nan)  # Use np.nan for missing values or np.zeros for zero padding
-    valid_segments = np.concatenate([fhr_data, padding])
-    # Replace 0 values in the data with NaN for further processing
-    valid_segments = np.where(valid_segments == 0, np.nan, valid_segments)
+        print(f"Signal in {file_path} is too short for a window of size {window_size}. Skipping.")
+    
+    return windows
 
-    return valid_segments, file_id , length
+# =============================================================================
+# Function to process the ZIP archive and split files into train/val/test sets
+# =============================================================================
+def process_zip_sliding_split(zip_path, window_size=100, stride=100//2,
+                              test_size=0.2, val_size=0.5, random_state=42):
+    """
+    Process a ZIP file containing CSV files with FHR data.
+    Splits the files by file_id into train, validation, and test groups first,
+    then creates sliding windows for each group and saves them into separate CSV files.
+    """
+    results_train = []
+    results_val = []
+    results_test = []
+    temp_dir = "extracted"  # Temporary extraction directory
 
-
-
-
-def process_zip(zip_path):
-    results = []
-    temp_dir = "extracted"  # Temporary directory to extract files
-    minimum_len = np.inf
-    maximum_len = -np.inf
-
-
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        # Extract all files to the temporary directory
-        z.extractall(temp_dir)
-
-        # Path inside the ZIP where CSV files are stored
+    try:
+        # Extract ZIP file into temporary directory
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            z.extractall(temp_dir)
+        
+        # Assume files are inside a nested directory "signals/signals"
         nested_path = os.path.join(temp_dir, "signals", "signals")
-
-        # Iterate through all CSV files in the nested directory
+        
+        # Build a list of all CSV file paths
+        all_files = []
         for root, _, files in os.walk(nested_path):
             for file in files:
                 if file.endswith('.csv'):
-                    file_path = os.path.join(root, file)
-                    try:
-                        # Call the process_signal function to extract valid segments
-                        valid_segments, file_id,length = process_signal(file_path)
-                        if length <= minimum_len:
-                            minimum_len = length
-                        if length >= maximum_len:
-                            maximum_len = length
-                        # Loop through the valid segments and extract the desired information
-                        # for segment in valid_segments:
-                        result = pd.DataFrame({
-                            "file_id": file_id ,
-                            "fhr": valid_segments
-                         })
-                        results.append(result)
-
-                    except Exception as e:
-                        print(f"Error processing {file_path}: {e}")
-
-    # Concatenate all the results into one DataFrame
-    final_df = pd.concat(results, ignore_index=True)
-    # Count the number of unique 'fileid' values in the final_df
-    unique_file_ids = final_df['file_id'].nunique()
-    # Print the result
-    print(f"Number of unique file_id values: {unique_file_ids}")
-    os.makedirs('generate_data', exist_ok=True)
-    final_df.to_csv(f'generate_data/timesnet_df.csv', index=False)
-
-    
-    # Clean up temporary directory
-    for root, _, files in os.walk(temp_dir, topdown=False):
-        for file in files:
-            os.remove(os.path.join(root, file))
-        os.rmdir(root)
-    print(f'max len file: {maximum_len}') # 21620
-    return final_df
-
-
-
-def introduce_missing_values(X, rate, pattern):
-    if pattern == "point":
-        return mcar(X, rate)
-    elif pattern == "subseq":
-        return seq_missing(X, rate)
-    elif pattern == "block":
-        return block_missing(X, factor=rate)
-    else:
-        raise ValueError(f"Unknown missingness pattern: {pattern}")
-
-
-#padding
-#normalization 
-# Main block to execute
-if __name__ == "__main__":
-    zip_file_path = r'/home/nicoleka/fetal_monitoring_final_project/signals.zip'
-    process_zip(zip_file_path)
-    df = pd.read_csv('generate_data/timesnet_df.csv')
-
-    #only fhr:
-    df = df[['fhr']]
-
-    # Define the sequence length and reshape
-    sequence_length = 21620
-    n_features = 1
-
-    # Ensure the data is a multiple of sequence_length
-    n_samples = len(df) // sequence_length
-
-    print(n_samples)
-
-    reshaped_data = df['fhr'].values[:n_samples * sequence_length].reshape(n_samples, sequence_length, n_features)
-    print(f"Reshaped data: {reshaped_data}")
-    print(f"Reshaped data shape: {reshaped_data.shape}")
-
-
-    # Split the reshaped data into train (70%), validation (15%), and test (15%)
-    train_data, temp_data = train_test_split(reshaped_data, test_size=0.3, random_state=42)
-    val_data, test_data = train_test_split(temp_data, test_size=0.5, random_state=42)
-
-    print(f"Train shape: {train_data.shape}")
-    print(f"Validation shape: {val_data.shape}")
-    print(f"Test shape: {test_data.shape}")
-
-    #new
-    train_data_with_missing = introduce_missing_values(train_data, rate=0.1,pattern="point")
-
-    # Introduce missing values in validation and test sets
-    val_data_with_missing = introduce_missing_values(val_data, rate=0.1,pattern="point")
-    test_data_with_missing = introduce_missing_values(test_data, rate=0.1,pattern="point")
-
-    # Prepare training, validation, and testing dictionaries
-    # train_set = {"X": train_data}
-
-    train_set = {"X": train_data_with_missing, "X_ori" : train_data}
-    val_set = {"X": val_data_with_missing, "X_ori": val_data}  # Include both original and missing data
-    test_set = {"X": test_data_with_missing}
-
-    # Mask for testing (optional for metric calculation)
-    test_X_indicating_mask = np.isnan(test_data) ^ np.isnan(test_data_with_missing) #xor - true only for null that were added in masking (not initiall nulls)
-    test_X_ori = np.nan_to_num(test_data)  # Replace NaNs with 0 for metrics
-
-
-
-    # # Initialize the model
-    # timesnet = TimesNet(
-    #     n_steps=21620,                # Sequence length (number of timestamps per sample)
-    #     n_features=1,                # Number of features (1 for FHR)
-    #     n_layers=2,                  # Number of layers in the model
-    #     top_k=1,                     # Top K imputation strategy
-    #     d_model=128,                 # Dimension of the model (e.g., embedding size)
-    #     d_ffn=512,                   # Dimension of the feedforward network
-    #     n_kernels=5,                 # Number of kernels in the convolution layers
-    #     dropout=0.3,                 # Dropout rate to prevent overfitting
-    #     apply_nonstationary_norm=True, # Whether to apply non-stationary normalization ???
-    #     batch_size=32,               # Batch size for training
-    #     epochs=10,                   # Number of epochs for training
-    #     patience=3,                  # Patience for early stopping
-    #     optimizer=Adam(lr=1e-3),     # Optimizer (Adam with learning rate 0.001)
-    #     num_workers=0,               # Number of workers for data loading
-    #     device=None,                 # Device (None for automatic selection)
-    #     saving_path="tutorial_results/imputation/timesnet", # Path to save results
-    #     model_saving_strategy="best", # Save only the best model
-    # )
-
-    # # # Train the model
-    # timesnet.fit(train_set=train_set, val_set=val_set)
-
-    # # After training, evaluate the model on the test set
-    # timesnet_results = timesnet.predict(test_set)
-    # timesnet_imputation = timesnet_results["imputation"]
-
-    # # Masked MAE calculation (ignoring missing values)
-    # testing_mae = mean_absolute_error(test_X_ori[test_X_indicating_mask], timesnet_imputation[test_X_indicating_mask])
-    # print(f"Testing mean absolute error: {testing_mae:.4f}")
-    # testing_mse = mean_squared_error(test_X_ori[test_X_indicating_mask], timesnet_imputation[test_X_indicating_mask])
-    # print(f"Testing mean squared error: {testing_mse:.4f}")
-
-
-
-import itertools
-from pypots.imputation import TimesNet
-from pypots.optim import Adam
-from sklearn.metrics import mean_squared_error
-
-# Your hyperparameter grid
-param_grid = {
-    "n_layers": [1, 2, 3],
-    "top_k": [1, 2, 3, 4, 5],
-    "d_model": [128, 256, 512, 1024],
-    "d_ffn": [128, 256, 512, 1024],
-    "n_kernels": [4, 5, 6],
-    "dropout": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
-    "lr": [0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01]  # expanded for manual grid
-}
-
-# Create all combinations
-keys, values = zip(*param_grid.items())
-combinations = list(itertools.product(*values))
-
-best_mse = float("inf")
-best_config = None
-
-print(f"Total combinations to evaluate: {len(combinations)}")
-
-for idx, combo in enumerate(combinations):
-    config = dict(zip(keys, combo))
-    print(f"\n[{idx + 1}/{len(combinations)}] Trying config: {config}")
-
-    try:
-        model = TimesNet(
-            n_steps=21620,
-            n_features=1,
-            n_layers=config["n_layers"],
-            top_k=config["top_k"],
-            d_model=config["d_model"],
-            d_ffn=config["d_ffn"],
-            n_kernels=config["n_kernels"],
-            dropout=config["dropout"],
-            apply_nonstationary_norm=True,
-            batch_size=32,
-            epochs=30,  # shorter training for tuning
-            patience=3,
-            optimizer=Adam(lr=config["lr"]),
-            num_workers=0,
-            device=None,
-            saving_path="gridsearch_results/timesnet",
-            model_saving_strategy="best"
+                    all_files.append(os.path.join(root, file))
+                    
+        # Split file list into test and remaining files (train/validation)
+        train_files, temp_files = train_test_split(
+            all_files, test_size=test_size, random_state=random_state
+        )
+        # Further split train_val into training and validation sets
+        val_files, test_files = train_test_split(
+            temp_files, test_size= 0.5, random_state=random_state
         )
 
-        model.fit(train_set=train_set, val_set=val_set)
-        results = model.predict(test_set)
-        imputed = results["imputation"]
+        print(f"Total files: {len(all_files)}")
+        print(f"Training files: {len(train_files)}")
+        print(f"Validation files: {len(val_files)}")
+        print(f"Test files: {len(test_files)}")
 
-        mse = mean_squared_error(test_X_ori[test_X_indicating_mask], imputed[test_X_indicating_mask])
-        print(f"→ MSE: {mse:.4f}")
+        # Process training files: generate sliding windows and collect results
+        for file_path in train_files:
+            try:
+                windows = process_signal_sliding_window(file_path, window_size, stride)
+                for window, file_id, start_idx in windows:
+                    df_window = pd.DataFrame({
+                        "file_id": [file_id],
+                        "start_index": [start_idx],
+                        "fhr": [list(window)]  # Storing as a list for CSV
+                    })
+                    results_train.append(df_window)
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
 
-        if mse < best_mse:
-            best_mse = mse
-            best_config = config
-            print("✅ New best config!")
+        # Process validation files
+        for file_path in val_files:
+            try:
+                windows = process_signal_sliding_window(file_path, window_size, stride)
+                for window, file_id, start_idx in windows:
+                    df_window = pd.DataFrame({
+                        "file_id": [file_id],
+                        "start_index": [start_idx],
+                        "fhr": [list(window)]
+                    })
+                    results_val.append(df_window)
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
 
-    except Exception as e:
-        print(f"❌ Failed with config {config}: {e}")
+        # Process test files
+        for file_path in test_files:
+            try:
+                windows = process_signal_sliding_window(file_path, window_size, stride)
+                for window, file_id, start_idx in windows:
+                    df_window = pd.DataFrame({
+                        "file_id": [file_id],
+                        "start_index": [start_idx],
+                        "fhr": [list(window)]
+                    })
+                    results_test.append(df_window)
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
 
-print("\n🏆 Best config:")
-print(best_config)
-print(f"Best MSE: {best_mse:.4f}")
+        # Save results into separate CSV files
+        os.makedirs('generate_data', exist_ok=True)
+        if results_train:
+            train_df = pd.concat(results_train, ignore_index=True)
+            print(f"Number of training windows: {len(train_df)}")
+            train_df.to_csv(os.path.join('generate_data', 'timesnet_sliding_train.csv'), index=False)
+        if results_val:
+            val_df = pd.concat(results_val, ignore_index=True)
+            print(f"Number of validation windows: {len(val_df)}")
+            val_df.to_csv(os.path.join('generate_data', 'timesnet_sliding_val.csv'), index=False)
+        if results_test:
+            test_df = pd.concat(results_test, ignore_index=True)
+            print(f"Number of test windows: {len(test_df)}")
+            test_df.to_csv(os.path.join('generate_data', 'timesnet_sliding_test.csv'), index=False)
+    
+    finally:
+        # Clean up the temporary extraction directory
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+# =============================================================================
+# Function to introduce missing values into data using a specified pattern.
+# =============================================================================
+def introduce_missing_values(X, rate, pattern, seq_len=8):
+    """
+    Introduces missing values in a 3D NumPy array.
+    Supported patterns: 'point', 'subseq', and 'block'.
+    """
+    if not (0 <= rate <= 1):
+        raise ValueError("Rate must be between 0 and 1")
+    if X.ndim != 3:
+        raise ValueError("Input X must be 3D [samples, timesteps, features]")
+
+    X_missing = np.copy(X)
+    n_samples, n_steps, n_features = X.shape
+
+    if pattern == "point":
+        return mcar(X, rate)
+    
+    elif pattern == "subseq":
+        if n_steps < seq_len:
+            raise ValueError(f"Timesteps ({n_steps}) < seq_len ({seq_len})")
+
+        # Total possible starting positions per sample and feature
+        possible_starts = n_steps - seq_len + 1
+        total_positions = n_samples * n_features * possible_starts
+        
+        # Number of sequences to mask
+        num_sequences = int(total_positions * rate / seq_len)
+        
+        if num_sequences > total_positions:
+            raise ValueError(f"Rate {rate} requires {num_sequences} sequences but only {total_positions} available")
+
+        # Build list of all valid (sample, feature, start) tuples
+        all_positions = [(s, f, st) 
+                         for s in range(n_samples)
+                         for f in range(n_features)
+                         for st in range(possible_starts)]
+        
+        # Randomly sample unique positions without replacement
+        selected_positions = random.sample(all_positions, num_sequences)
+
+        # Apply masking for each selected tuple
+        for s, f, st in selected_positions:
+            X_missing[s, st:st+seq_len, f] = np.nan
+
+        return X_missing
+    
+    elif pattern == "block":
+        return block_missing(X_missing, factor=rate)
+    
+    else:
+        raise ValueError(f"Invalid pattern: {pattern}. Use 'point', 'subseq', or 'block'")
+
+
+# =============================================================================
+# Function to evaluate baseline imputation methods (e.g. linear, mean, median, locf)
+# =============================================================================
+def evaluate_interpolation_baselines(test_masked, test_original, mask):
+    """
+    Evaluate several simple interpolation methods.
+    Returns a dictionary with MAE and MSE scores.
+    """
+    results = {}
+    n_samples, n_steps, n_features = test_masked.shape
+
+    methods = {
+        "linear": lambda s: s.interpolate(method="linear", limit_direction="both"),
+        "mean": lambda s: s.fillna(s.rolling(24, min_periods=1).mean()).fillna(s.mean()),
+        "median": lambda s: s.fillna(s.rolling(24, min_periods=1).median()).fillna(s.median()),
+        "locf_safe": lambda s: s.fillna(method="ffill").fillna(method="bfill"),
+    }
+
+    for name, func in methods.items():
+        imputed = test_masked.copy()
+        for i in range(n_samples):
+            for f in range(n_features):
+                series = pd.Series(imputed[i, :, f])
+                # If all values are missing, fallback to zeros
+                if series.isna().all():
+                    imputed[i, :, f] = 0
+                else:
+                    imputed[i, :, f] = func(series).values
+                
+        valid_mask = mask & (~np.isnan(test_original))
+        mae = mean_absolute_error(test_original[valid_mask], imputed[valid_mask])
+        mse = mean_squared_error(test_original[valid_mask], imputed[valid_mask])
+        results[name] = {"mae": mae, "mse": mse}
+
+    return results
+
+# =============================================================================
+# Helper: Convert a string representation of a list into a NumPy array.
+# =============================================================================
+def convert_str_to_array(s):
+    # Replace "nan" with Python None so ast.literal_eval can work
+    s_fixed = s.replace("nan", "None")
+    lst = ast.literal_eval(s_fixed)
+    return np.array([np.nan if val is None else val for val in lst])
+
+# =============================================================================
+# Main pipeline
+# =============================================================================
+if __name__ == "__main__":
+    # --------------------------
+    # Step 1: Process the ZIP file and split by file_id
+    # --------------------------
+    # Change this path to the location of your ZIP file
+    zip_file_path = r'/home/nicoleka/fetal_monitoring_final_project/signals.zip'
+    
+    # Define parameters for window extraction
+    window_size = 75   # Adjust as needed
+    stride = window_size // 2
+    
+    # Process the ZIP and create three CSV files for train/val/test
+    process_zip_sliding_split(
+        zip_file_path, window_size=window_size, stride=stride,
+        test_size=0.2, val_size=0.5, random_state=42
+    )
+    
+    # --------------------------
+    # Step 2: Load CSV files and convert window data into NumPy arrays
+    # --------------------------
+    # Load each group from its separate CSV file
+    train_df = pd.read_csv('generate_data/timesnet_sliding_train.csv')
+    val_df = pd.read_csv('generate_data/timesnet_sliding_val.csv')
+    test_df = pd.read_csv('generate_data/timesnet_sliding_test.csv')
+    
+    print("Training data sample:")
+    print(train_df.head())
+    print("Validation data sample:")
+    print(val_df.head())
+    print("Test data sample:")
+    print(test_df.head())
+    
+    # Convert the string representation of the list in the 'fhr' column to arrays.
+    train_windows = train_df['fhr'].apply(convert_str_to_array).tolist()
+    val_windows = val_df['fhr'].apply(convert_str_to_array).tolist()
+    test_windows = test_df['fhr'].apply(convert_str_to_array).tolist()
+    
+    # Reshape to add the feature dimension (assuming univariate data)
+    n_features = 1
+    train_data = np.array(train_windows).reshape(-1, window_size, n_features)
+    val_data = np.array(val_windows).reshape(-1, window_size, n_features)
+    test_data = np.array(test_windows).reshape(-1, window_size, n_features)
+    
+    print(f"Train data shape: {train_data.shape}")
+    print(f"Validation data shape: {val_data.shape}")
+    print(f"Test data shape: {test_data.shape}")
+    
+    # --------------------------
+    # Step 3: Introduce missing values
+    # --------------------------
+    missing_rate = 0.01   # Adjust as desired
+    train_data_with_missing = introduce_missing_values(train_data, rate=missing_rate, pattern="subseq")
+    val_data_with_missing = introduce_missing_values(val_data, rate=missing_rate, pattern="subseq")
+    test_data_with_missing = introduce_missing_values(test_data, rate=missing_rate, pattern="subseq")
+    
+    # Create data sets (here for model training and evaluation)
+    train_set = {"X": train_data_with_missing, "X_ori": train_data}
+    val_set = {"X": val_data_with_missing, "X_ori": val_data}
+    test_set = {"X": test_data_with_missing}
+    
+    # Create a mask for evaluating imputation performance (if needed)
+    test_X_indicating_mask = np.isnan(test_data) ^ np.isnan(test_data_with_missing)
+    test_X_ori = np.nan_to_num(test_data)
+    
+    baseline_results = evaluate_interpolation_baselines(
+        test_masked=test_data_with_missing,
+        test_original=test_X_ori,
+        mask=test_X_indicating_mask
+    )
+    
+    print("\nBaseline Imputation Results:")
+    for method, scores in baseline_results.items():
+        print(method)
+        print("MAE:", scores['mae'])
+        print("MSE:", scores['mse'])
+    
+    # --------------------------
+    # Step 4: Hyperparameter Grid Search and Model Training with TimesNet
+    # --------------------------
+    # Define grid search hyperparameters
+    param_grid = {
+        "batch_size": [16],
+        "n_layers": [3],
+        "top_k": [2],
+        "d_model": [8, 16, 32, 64, 128, 256],
+        # "d_ffn": [256],
+        "n_kernels": [3],
+        "dropout": [0.3],
+        "lr": [0.0005]
+    }
+    
+    keys, values = zip(*param_grid.items())
+    combinations = list(itertools.product(*values))
+    
+    best_mse = float("inf")
+    best_config = None
+    
+    print(f"\nTotal hyperparameter combinations to evaluate: {len(combinations)}")
+    
+    for idx, combo in enumerate(combinations):
+        # Clear CUDA cache if applicable
+        torch.cuda.empty_cache()
+        config = dict(zip(keys, combo))
+        print(f"\n[{idx + 1}/{len(combinations)}] Trying config: {config}")
+        try:
+            d_model = config["d_model"]
+            # Initialize the TimesNet model with the given configuration
+            model = TimesNet(
+                n_steps=window_size,
+                n_features=n_features,
+                n_layers=config["n_layers"],
+                top_k=config["top_k"],
+                d_model=d_model,
+                d_ffn=d_model * 2,
+                n_kernels=config["n_kernels"],
+                dropout=config["dropout"],
+                apply_nonstationary_norm=True,
+                batch_size=config["batch_size"],
+                epochs=100,
+                patience=5,
+                optimizer=Adam(lr=config["lr"], weight_decay=1e-4),
+                num_workers=0,
+                device=None,
+                saving_path="gridsearch_results/timesnet",
+                model_saving_strategy="best"
+            )
+    
+            model.fit(train_set=train_set, val_set=val_set)
+            results = model.predict(test_set)
+            imputed = results["imputation"]
+    
+            mse = mean_squared_error(test_X_ori[test_X_indicating_mask], imputed[test_X_indicating_mask])
+            print(f"→ MSE: {mse:.4f}")
+    
+            if mse < best_mse:
+                best_mse = mse
+                best_config = config
+                print("✅ New best config!")
+    
+        except Exception as e:
+            print(f"❌ Failed with config {config}: {e}")
+    
+    print("\n🏆 Best hyperparameter configuration:")
+    print(best_config)
+    print(f"Best MSE achieved: {best_mse:.4f}")
