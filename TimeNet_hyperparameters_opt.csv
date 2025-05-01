@@ -1,4 +1,4 @@
-window,batch_size,n_layers,top_k,d_model,d_ffn_ratio,n_kernels,dropout,lr,mse,,
+window,batch_size,n_layers,top_k,d_model,d_ffn_ratio,n_kernels,dropout,lr,mse,variance,
 1000,16,3,2,16,1,1,0.3,0.0005,0.922673649,,
 1000,64,3,2,16,1,1,0.3,0.0005,0.88573011,,
 1000,256,3,2,16,1,1,0.3,0.0005,0.905433655,,
