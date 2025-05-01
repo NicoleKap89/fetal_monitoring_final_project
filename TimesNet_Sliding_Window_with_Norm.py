@@ -5,6 +5,7 @@ import itertools
 import random
 import zipfile
 import shutil
+import csv
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -147,7 +148,7 @@ def introduce_missing_values(X, rate, pattern, seq_len=8):
 # =============================================================================
 # 4) Baseline (original-scale errors) - Modified to keep errors in normalized scale
 # =============================================================================
-def evaluate_interpolation_baselines(test_masked, test_original, mask, scaler):
+def evaluate_interpolation_baselines(test_masked, test_original, mask, window):
     """
     Now returns errors in the *normalized* scale (no inverse transform).
     """
@@ -156,8 +157,8 @@ def evaluate_interpolation_baselines(test_masked, test_original, mask, scaler):
 
     methods = {
         "linear":    lambda s: s.interpolate(method="linear",   limit_direction="both"),
-        "mean":      lambda s: s.fillna(s.rolling(24, min_periods=1).mean()).fillna(s.mean()),
-        "median":    lambda s: s.fillna(s.rolling(24, min_periods=1).median()).fillna(s.median()),
+        "mean":      lambda s: s.fillna(s.rolling(window//10, min_periods=1).mean()).fillna(s.mean()),
+        "median":    lambda s: s.fillna(s.rolling(window//10, min_periods=1).median()).fillna(s.median()),
         "locf_safe": lambda s: s.fillna(method="ffill").fillna(method="bfill"),
     }
 
@@ -205,8 +206,8 @@ def convert_str_to_array(s):
 # Main
 # =============================================================================
 if __name__ == "__main__":
-    zip_file_path = r'/sise/home/mayaroz/signals.zip'
-    window_size = 200
+    zip_file_path = r'/home/nicoleka/fetal_monitoring_final_project/signals.zip'
+    window_size = 1000
     stride = window_size // 2
 
     # 1) Build sliding-window CSVs
@@ -251,7 +252,7 @@ if __name__ == "__main__":
     # --- end normalization ---
 
     # 3) Introduce missing
-    missing_rate = 0.01
+    missing_rate = 0.18
     train_miss = introduce_missing_values(train_data, rate=missing_rate, pattern="subseq")
     val_miss   = introduce_missing_values(val_data,   rate=missing_rate, pattern="subseq")
     test_miss  = introduce_missing_values(test_data,  rate=missing_rate, pattern="subseq")
@@ -268,7 +269,7 @@ if __name__ == "__main__":
         test_masked=test_miss,
         test_original=test_X_ori,
         mask=mask,
-        scaler=scaler
+        window=window_size 
     )
 
     print("\nBaseline Imputation Results (original scale):")
@@ -278,11 +279,11 @@ if __name__ == "__main__":
     # 5) Hyperparameter search + TimesNet
     param_grid = {
         "batch_size": [64],
-        "n_layers":   [3],
-        "top_k":      [2],
+        "n_layers":   [1],
+        "top_k":      [1],
         "d_model":    [128],
-        "d_ffn":      [256],
-        "n_kernels":  [3],
+        "d_ffn_ratio":[2],
+        "n_kernels":  [1, 3, 5],
         "dropout":    [0.3],
         "lr":         [0.0005]
     }
@@ -291,492 +292,69 @@ if __name__ == "__main__":
 
     best_mse, best_cfg = float("inf"), None
     print(f"\nTotal configs: {len(combos)}")
-    for idx, combo in enumerate(combos, 1):
-        torch.cuda.empty_cache()
-        cfg = dict(zip(keys, combo))
-        print(f"\n[{idx}/{len(combos)}] Trying {cfg}")
-        try:
-            model = TimesNet(
-                n_steps=n_steps,
-                n_features=n_feats,
-                n_layers=cfg["n_layers"],
-                top_k=cfg["top_k"],
-                d_model=cfg["d_model"],
-                d_ffn=cfg["d_ffn"],
-                n_kernels=cfg["n_kernels"],
-                dropout=cfg["dropout"],
-                apply_nonstationary_norm=True,
-                batch_size=cfg["batch_size"],
-                epochs=100,
-                patience=5,
-                optimizer=Adam(lr=cfg["lr"], weight_decay=1e-4),
-                num_workers=0,
-                device=torch.device('cuda'),
-                saving_path="gridsearch_results/timesnet",
-                model_saving_strategy="best"
-            )
-            model.fit(train_set=train_set, val_set=val_set)
-            res = model.predict(test_set)
-            imputed = res["imputation"]
-
-            # Keep the imputed data in the normalized scale (no inverse transform)
-            # imp_flat = imputed.reshape(-1, n_feats)
-            
-            # Compute MSE directly on the normalized imputed data
-            mse = mean_squared_error(
-                test_X_ori[mask],  # Ground truth (original data)
-                imputed[mask]     # Imputed values (in normalized scale)
-            )
-            print(f"→ MSE: {mse:.4f}")
 
 
-            if mse < best_mse:
-                best_mse, best_cfg = mse, cfg
-                print("✅ New best config!")
+    file_path = "grid_search_results.csv"
+    file_exists = os.path.isfile(file_path)
+    mode = "a" if file_exists else "w"
+    with open(file_path, mode, newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        # only write header if brand-new file
+        if not file_exists:
+            writer.writerow(list(param_grid.keys()) + ["mse"])
 
-        except Exception as e:
-            print(f"❌ Failed {cfg}: {e}")
+
+        for idx, combo in enumerate(combos, 1):
+            torch.cuda.empty_cache()
+            cfg = dict(zip(keys, combo))
+            print(f"\n[{idx}/{len(combos)}] Trying {cfg}")
+            try:
+                d_model=cfg["d_model"]
+                model = TimesNet(
+                    n_steps=n_steps,
+                    n_features=n_feats,
+                    n_layers=cfg["n_layers"],
+                    top_k=cfg["top_k"],
+                    d_model=d_model,
+                    d_ffn=cfg["d_ffn_ratio"] * d_model,
+                    n_kernels=cfg["n_kernels"],
+                    dropout=cfg["dropout"],
+                    apply_nonstationary_norm=False,
+                    batch_size=cfg["batch_size"],
+                    epochs=100,
+                    patience=5,
+                    optimizer=Adam(lr=cfg["lr"], weight_decay=1e-4),
+                    num_workers=0,
+                    device=torch.device('cuda'),
+                    saving_path="gridsearch_results/timesnet",
+                    model_saving_strategy="best"
+                )
+                model.fit(train_set=train_set, val_set=val_set)
+                res = model.predict(test_set)
+                imputed = res["imputation"]
+
+                # Keep the imputed data in the normalized scale (no inverse transform)
+                # imp_flat = imputed.reshape(-1, n_feats)
+                
+                # Compute MSE directly on the normalized imputed data
+                mse = mean_squared_error(
+                    test_X_ori[mask],  # Ground truth (original data)
+                    imputed[mask]     # Imputed values (in normalized scale)
+                )
+                print(f"→ MSE: {mse:.4f}")
+
+                # ——— Write cfg + mse to CSV ———
+                row = [cfg[k] for k in param_grid.keys()] + [mse]
+                writer.writerow(row)
+
+                if mse < best_mse:
+                    best_mse, best_cfg = mse, cfg
+                    print("✅ New best config!")
+
+            except Exception as e:
+                print(f"❌ Failed {cfg}: {e}")
+        
+        writer.writerow([])
 
     print("\n🏆 Best config:", best_cfg)
     print(f"Best MSE: {best_mse:.4f}")
-
-
-# # Standard library imports
-# import ast
-# import gc
-# import itertools
-# import os
-# import random
-# import zipfile
-
-# # Third-party library imports
-# import matplotlib.pyplot as plt
-# import numpy as np
-# import pandas as pd
-# import tensorflow as tf
-# import torch
-
-# # scikit-learn imports
-# from sklearn.impute import KNNImputer
-# from sklearn.metrics import mean_absolute_error, mean_squared_error
-# from sklearn.model_selection import train_test_split
-
-# # PyPOTS imports
-# from pypots.data import load_specific_dataset
-# from pypots.imputation import SAITS, TimesNet
-# from pypots.optim import Adam
-# from pypots.utils.metrics import calc_mae
-# from pypots.utils.random import set_random_seed
-
-# # Other specialized libraries
-# import benchpots
-# from pygrinder import block_missing, mcar, seq_missing
-
-
-# def process_signal_sliding_window(file_path, window_size=2000, stride=2000//2):
-#     """
-#     Processes FHR signal data from a CSV file and extracts sliding windows of fixed length.
-    
-#     Args:
-#         file_path (str): Path to the CSV file containing FHR data.
-#         window_size (int): The fixed length for each window.
-#         stride (int): Number of timesteps to shift between consecutive windows.
-#                       A smaller stride means more overlap.
-    
-#     Returns:
-#         list of tuples: Each tuple contains (window, file_id, start_index)
-#                         where window is a numpy array of shape (window_size,).
-#     """
-#     import numpy as np
-#     import pandas as pd
-#     # Read CSV and extract FHR column
-#     df = pd.read_csv(file_path)
-#     fhr_data = df["FHR"].values.astype(float)
-    
-#     # Replace zeroes with NaN (if you want to treat 0 as missing data)
-#     fhr_data[fhr_data == 0] = np.nan
-    
-#     file_id = os.path.basename(file_path)
-#     windows = []
-    
-#     # Only process if the signal is long enough
-#     if len(fhr_data) >= window_size:
-#         for start in range(0, len(fhr_data) - window_size + 1, stride):
-#             window = fhr_data[start:start + window_size]
-#             windows.append((window, file_id, start))
-#     else:
-#         # Optionally, handle signals that are too short. You could choose to pad, discard, or skip.
-#         print(f"Signal in {file_path} is too short for a window of size {window_size}. Skipping.")
-    
-#     return windows
-
-
-# def process_zip_sliding(zip_path, window_size=2000, stride=2000//2):
-#     """
-#     Processes a ZIP file containing CSV files with FHR data and extracts sliding windows.
-    
-#     Args:
-#         zip_path (str): Path to the ZIP file.
-#         window_size (int): The fixed length for each extracted window.
-#         stride (int): The sliding stride for the window.
-    
-#     Returns:
-#         None. Saves a CSV file with sliding window data.
-#     """
-#     import os
-#     import zipfile
-#     import pandas as pd
-#     results = []
-#     temp_dir = "extracted"  # Temporary extraction directory
-
-#     try:
-#         with zipfile.ZipFile(zip_path, 'r') as z:
-#             z.extractall(temp_dir)
-
-#         nested_path = os.path.join(temp_dir, "signals", "signals")
-        
-#         # Iterate through the CSV files
-#         for root, _, files in os.walk(nested_path):
-#             for file in files:
-#                 if file.endswith('.csv'):
-#                     file_path = os.path.join(root, file)
-#                     try:
-#                         # Extract windows using the sliding window function
-#                         windows = process_signal_sliding_window(file_path, window_size, stride)
-#                         for window, file_id, start_idx in windows:
-#                             # Save the window as a list. You can also consider storing as a npy file for efficiency.
-#                             df_window = pd.DataFrame({
-#                                 "file_id": [file_id],
-#                                 "start_index": [start_idx],
-#                                 "fhr": [list(window)]  # convert numpy array to list for CSV storage
-#                             })
-#                             # print(type(df_window['fhr']))
-#                             # print(type(df_window['fhr'][0][0]))
-#                             results.append(df_window)
-#                     except Exception as e:
-#                         print(f"Error processing {file_path}: {e}")
-
-#         if results:
-#             final_df = pd.concat(results, ignore_index=True)
-#             unique_file_ids = final_df['file_id'].nunique()
-#             print(f"Number of unique file_id values: {unique_file_ids}")
-#             output_dir = 'generate_data'
-#             os.makedirs(output_dir, exist_ok=True)
-#             final_df.to_csv(os.path.join(output_dir, 'timesnet_sliding.csv'), index=False)
-#         else:
-#             print("No valid CSV files found or processed.")
-
-#     finally:
-#         # Clean up temporary directory
-#         import shutil
-#         if os.path.exists(temp_dir):
-#             shutil.rmtree(temp_dir)
-
-
-# def introduce_missing_values(X, rate, pattern, seq_len=8):
-#     """
-#     Introduces missing values into a NumPy array based on a specified pattern.
-#     For 'subseq', applies the rate per sample and ensures unique sequences are masked.
-
-#     Args:
-#         X (np.ndarray): The input data array, expected shape [samples, timesteps, features].
-#         rate (float): The approximate proportion of values to be masked (0.0 to 1.0).
-#                       For 'subseq' and 'point', applied per sample.
-#                       For 'block', acts as a 'factor' globally as per pygrinder.
-#         pattern (str): The missingness pattern ('point', 'subseq', 'block').
-#         seq_len (int): The fixed length of missing sequences for the 'subseq' pattern. Default is 8.
-
-#     Returns:
-#         np.ndarray: A copy of X with missing values introduced (represented as np.nan).
-#     """
-#     # Input validation
-#     if not (0 <= rate <= 1):
-#         raise ValueError("Rate must be between 0 and 1")
-#     if X.ndim != 3:
-#         raise ValueError("Input X must be 3D [samples, timesteps, features]")
-
-#     X_missing = np.copy(X)
-#     n_samples, n_steps, n_features = X.shape
-
-#     if pattern == "point":
-#         return mcar(X, rate)
-    
-#     elif pattern == "subseq":
-#         if n_steps < seq_len:
-#             raise ValueError(f"Timesteps ({n_steps}) < seq_len ({seq_len})")
-
-#         # Pre-calculate all possible start positions
-#         possible_starts = n_steps - seq_len + 1
-#         total_positions = n_samples * n_features * possible_starts
-        
-#         # Calculate required sequences without per-sample loops
-#         num_sequences = int(total_positions * rate / seq_len)
-        
-#         # Generate unique positions using random sampling
-#         if num_sequences > total_positions:
-#             raise ValueError(f"Rate {rate} requires {num_sequences} sequences but only {total_positions} available")
-
-#         # Create all possible position tuples
-#         all_positions = [(s, f, st) 
-#                         for s in range(n_samples)
-#                         for f in range(n_features)
-#                         for st in range(possible_starts)]
-        
-#         # Randomly select without replacement
-#         selected_positions = random.sample(all_positions, num_sequences)
-
-#         # Apply masking in vectorized way
-#         for s, f, st in selected_positions:
-#             X_missing[s, st:st+seq_len, f] = np.nan
-
-#         return X_missing
-    
-#     elif pattern == "block":
-#         return block_missing(X_missing, factor=rate)
-    
-#     else:
-#         raise ValueError(f"Invalid pattern: {pattern}. Use 'point', 'subseq', or 'block'")
-
-
-# def downsample_by_averaging(data, window_size=4):
-#     """
-#     Downsample data by averaging every window_size timestamps.
-    
-#     Parameters:
-#         data (np.ndarray): Input data with shape [samples, timesteps, features]
-#         window_size (int): Number of timestamps to average together
-    
-#     Returns:
-#         np.ndarray: Downsampled data with shape [samples, timesteps//window_size, features]
-#     """
-#     n_samples, n_steps, n_features = data.shape
-    
-#     # Calculate new sequence length after downsampling
-#     new_length = n_steps // window_size
-    
-#     # Create output array
-#     downsampled = np.zeros((n_samples, new_length, n_features))
-    
-#     # For each sample and feature, average the values in each window
-#     for i in range(n_samples):
-#         for j in range(n_features):
-#             # Reshape to handle window_size groups
-#             reshaped = data[i, :new_length*window_size, j].reshape(-1, window_size)
-            
-#             # Handle NaN values by using nanmean (mean ignoring NaNs)
-#             downsampled[i, :, j] = np.nanmean(reshaped, axis=1)
-    
-#     return downsampled
-
-
-# def evaluate_interpolation_baselines(test_masked, test_original, mask):
-#     """
-#     Evaluate multiple baseline interpolation methods on masked test data.
-
-#     Parameters:
-#         test_masked (np.ndarray): Test data with artificial missing values [samples, timesteps, features]
-#         test_original (np.ndarray): Original complete test data (NaNs replaced with 0s for metric use)
-#         mask (np.ndarray): Boolean mask indicating the artificially masked points (True = was masked)
-
-#     Returns:
-#         dict: MAE and MSE for each interpolation method
-#     """
-#     results = {}
-#     n_samples, n_steps, n_features = test_masked.shape
-
-
-#     methods = {
-#         "linear": lambda s: s.interpolate(method="linear", limit_direction="both"),
-#         # "cubic" : lambda s :s.interpolate(method='cubic', limit_direction='both', fill_value='extrapolate'),
-#         "mean": lambda s: s.fillna(s.rolling(24, min_periods=1).mean()).fillna(s.mean()),
-#         "median": lambda s: s.fillna(s.rolling(24, min_periods=1).median()).fillna(s.median()),
-#         #"locf_safe" means fill forward (LOCF), then backfill any leading NaNs so that the sequence has no missing values at all.
-#         "locf_safe": lambda s: s.fillna(method="ffill").fillna(method="bfill"),  # forward fill + backfill for safety
-
-#     }
-
-#     for name, func in methods.items():
-#         imputed = test_masked.copy()
-#         for i in range(n_samples):
-#             for f in range(n_features):
-#                 series = pd.Series(imputed[i, :, f])
-#                 if series.isna().all():
-#                     imputed[i, :, f] = 0  # Fallback for all-NaN
-#                 else:
-#                     imputed[i, :, f] = func(series).values
-                
-#         valid_mask = mask & (~np.isnan(test_original))  # Exclude original NaNs
-#         mae = mean_absolute_error(test_original[valid_mask], imputed[valid_mask])
-#         mse = mean_squared_error(test_original[valid_mask], imputed[valid_mask])
-#         results[name] = {"mae": mae, "mse": mse}
-
-#     return results
-
-
-# import numpy as np
-
-# def safe_eval(x):
-#     # eval with a restricted globals dictionary that maps 'nan' to np.nan
-#     return eval(x, {"__builtins__": None}, {"nan": np.nan})
-
-
-# if __name__ == "__main__":
-    
-#     # os.environ['CUDA_LAUNCH_BLOCKING']="1"
-#     # os.environ['TORCH_USE_CUDA_DSA'] = "1"
-#     import torch
-#     import numpy as np
-
-
-#     # zip_file_path = r'/home/nicoleka/fetal_monitoring_final_project/signals.zip'
-#     zip_file_path = r'/sise/home/mayaroz/signals.zip'
-    
-#     window_size = 100
-#     stride = window_size//2
-#     n_features = 1
-
-#     # Process the ZIP file to generate sliding windows
-#     process_zip_sliding(zip_file_path, window_size, stride)
-    
-#     # Load the CSV file with sliding window data
-#     df = pd.read_csv('generate_data/timesnet_sliding.csv')
-#     # print(df)
-#     # print(df['fhr'][0][0])
-#     # print(type(df['fhr'][0][0]))
-
-#     df = df[['fhr']]
-#     print(df)
-
-#     # Convert each string representation into an actual NumPy array
-#     # windows = df['fhr'].apply(lambda x: np.array((x))).tolist()
-
-#     #print(windows)
-#     # windows = df['fhr'].apply(lambda x: np.array(ast.literal_eval(x))).tolist()
-
-#     import ast
-#     import numpy as np
-
-#     def convert_str_to_array(s):
-#         # Replace nan with None (as a string) so ast.literal_eval can parse it.
-#         s_fixed = s.replace("nan", "None")
-#         # Convert string to list
-#         lst = ast.literal_eval(s_fixed)
-#         # Replace None with np.nan and return as a NumPy array
-#         return np.array([np.nan if val is None else val for val in lst])
-
-#     windows = df['fhr'].apply(convert_str_to_array).tolist()
-
-
-#     # Reshape to add a feature dimension (e.g., 1 if it's a univariate series)
-#     data_array = np.array(windows).reshape(-1, window_size, n_features)
-    
-#     print(f"Data array shape (sliding windows): {data_array.shape}")
-    
-#     # (Optional) Downsample or perform any other preprocessing here (using your downsample_by_averaging function)
-#     # window_size_ds = 10  # for example
-#     # downsampled_data = downsample_by_averaging(data_array, window_size=window_size_ds)
-#     # print(f"Downsampled data shape: {downsampled_data.shape}")
-    
-#     # Continue with train/validation/test splits
-#     from sklearn.model_selection import train_test_split
-    
-#     train_data, temp_data = train_test_split(data_array, test_size=0.2, random_state=42)
-#     val_data, test_data = train_test_split(temp_data, test_size=0.5, random_state=42)
-    
-#     print(f"Train shape: {train_data.shape}")
-#     print(f"Validation shape: {val_data.shape}")
-#     print(f"Test shape: {test_data.shape}")
-    
-#     # Introduce missing values as before
-#     train_data_with_missing = introduce_missing_values(train_data, rate=0.01, pattern="subseq")
-#     val_data_with_missing = introduce_missing_values(val_data, rate=0.01, pattern="subseq")
-#     test_data_with_missing = introduce_missing_values(test_data, rate=0.01, pattern="subseq")
-    
-#     # Rest of your model training and evaluation code can remain largely the same
-#     train_set = {"X": train_data_with_missing, "X_ori": train_data}
-#     val_set = {"X": val_data_with_missing, "X_ori": val_data}
-#     test_set = {"X": test_data_with_missing}
-    
-#     # Create a mask for evaluating imputation performance (if needed)
-#     test_X_indicating_mask = np.isnan(test_data) ^ np.isnan(test_data_with_missing)
-#     test_X_ori = np.nan_to_num(test_data)
-    
-#     baseline_results = evaluate_interpolation_baselines(
-#         test_masked=test_data_with_missing,
-#         test_original=test_X_ori,
-#         mask=test_X_indicating_mask
-#     )
-    
-#     for method, scores in baseline_results.items():
-#         print(method)
-#         print("MAE:", scores['mae'])
-#         print("MSE:", scores['mse'])
-    
-#     # Grid Search over hyperparameters for your TimesNet model (unchanged)
-#     import itertools
-#     from pypots.imputation import TimesNet
-#     from pypots.optim import Adam
-#     from sklearn.metrics import mean_squared_error
-    
-#     param_grid = {
-#         "batch_size": [32],
-#         "n_layers": [1],
-#         "top_k": [2],
-#         "d_model": [128],
-#         "d_ffn": [256],
-#         "n_kernels": [3],
-#         "dropout": [0.2],
-#         "lr": [0.0001]
-#     }
-    
-#     keys, values = zip(*param_grid.items())
-#     combinations = list(itertools.product(*values))
-    
-#     best_mse = float("inf")
-#     best_config = None
-    
-#     print(f"Total combinations to evaluate: {len(combinations)}")
-    
-#     for idx, combo in enumerate(combinations):
-#         torch.cuda.empty_cache()
-#         config = dict(zip(keys, combo))
-#         print(f"\n[{idx + 1}/{len(combinations)}] Trying config: {config}")
-#         try:
-#             model = TimesNet(
-#                 n_steps=window_size,
-#                 n_features=n_features,
-#                 n_layers=config["n_layers"],
-#                 top_k=config["top_k"],
-#                 d_model=config["d_model"],
-#                 d_ffn=config["d_ffn"],
-#                 n_kernels=config["n_kernels"],
-#                 dropout=config["dropout"],
-#                 apply_nonstationary_norm=True,
-#                 batch_size=config["batch_size"],
-#                 epochs=100,
-#                 patience=5,
-#                 optimizer=Adam(lr=config["lr"], weight_decay=1e-4),
-#                 num_workers=0,
-#                 device=None,
-#                 saving_path="gridsearch_results/timesnet",
-#                 model_saving_strategy="best"
-#             )
-    
-#             model.fit(train_set=train_set, val_set=val_set)
-#             results = model.predict(test_set)
-#             imputed = results["imputation"]
-    
-#             mse = mean_squared_error(test_X_ori[test_X_indicating_mask], imputed[test_X_indicating_mask])
-#             print(f"→ MSE: {mse:.4f}")
-    
-#             if mse < best_mse:
-#                 best_mse = mse
-#                 best_config = config
-#                 print("✅ New best config!")
-    
-#         except Exception as e:
-#             print(f"❌ Failed with config {config}: {e}")
-    
-#     print("\n🏆 Best config:")
-#     print(best_config)
-#     print(f"Best MSE: {best_mse:.4f}")
