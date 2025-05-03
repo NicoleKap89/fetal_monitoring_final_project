@@ -207,7 +207,7 @@ def convert_str_to_array(s):
 # =============================================================================
 if __name__ == "__main__":
     zip_file_path = r'/sise/home/mayaroz/signals.zip'
-    window_size = 50
+    window_size = 1000
     stride = window_size // 2
 
     # 1) Build sliding-window CSVs
