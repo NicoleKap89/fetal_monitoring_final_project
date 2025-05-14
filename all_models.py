@@ -330,7 +330,7 @@ if __name__ == "__main__":
     # Define path for the CSV file where all results will be stored
     csv_path = Path("imputation_results_summary.csv")
 
-    print("\nBaseline Imputation Results (original scale):")
+    print("\nBaseline Imputation Results")
     for model_name, scores in baseline_results.items():
         mae = scores['mae']
         mse = scores['mse']
@@ -349,13 +349,9 @@ if __name__ == "__main__":
         )
 
 
-    # print("\nBaseline Imputation Results (original scale):")
-    # for m, scores in baseline_results.items():
-    #     print(f"{m:10s} → MAE: {scores['mae']:.4f}, MSE: {scores['mse']:.4f}")
-
     d_model =16
     timesnet_model = TimesNet(
-    n_steps=n_steps,
+    n_steps=window_size,
     n_features=n_feats,
     n_layers=1,
     top_k=1,
@@ -392,9 +388,6 @@ if __name__ == "__main__":
     stride=stride
  )
     
-
-    with open("saved_models/timesnet_model.pkl", "wb") as f:
-        pickle.dump(timesnet_model, f)
 
     n_heads=4
     d_k = 16
@@ -456,10 +449,6 @@ if __name__ == "__main__":
  )
 
 
-    with open("saved_models/saits_model.pkl", "wb") as f:
-        pickle.dump(saits_model, f)
-    
-
     csdi_model = CSDI(
         n_steps=n_steps,
         n_features=n_feats,
@@ -503,10 +492,6 @@ if __name__ == "__main__":
     stride=stride
  )
     
-    with open("saved_models/csdi_model.pkl", "wb") as f:
-        pickle.dump(csdi_model, f)
-
-
     d_model = 16
     d_ffn_ratio=1
     timemixer_model = TimeMixer(
@@ -543,8 +528,10 @@ if __name__ == "__main__":
  )
     
 
-    with open("saved_models/timemixer_model.pkl", "wb") as f:
-        pickle.dump(timemixer_model, f)
+
+
+    # with open("saved_models/timemixer_model.pkl", "wb") as f:
+    #     pickle.dump(timemixer_model, f)
 
     # grud_model =GRUD(
     #     n_steps=window_size,
