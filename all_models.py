@@ -6,7 +6,7 @@ import random
 import zipfile
 import shutil
 import csv
-
+import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -284,6 +284,9 @@ if __name__ == "__main__":
     train_scaled = scaler.fit_transform(train_flat)
     val_scaled   = scaler.transform(val_flat)
     test_scaled  = scaler.transform(test_flat)
+    os.makedirs("saved_models", exist_ok=True)
+    with open("saved_models/standard_scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
 
     train_data = train_scaled.reshape(n_train, n_steps, n_feats)
     val_data   = val_scaled.reshape(n_val,   n_steps, n_feats)
@@ -291,7 +294,7 @@ if __name__ == "__main__":
     # --- end normalization ---
 
     # 3) Introduce missing
-    missing_rate = 0.1
+    missing_rate = 0.18
     pattern = "subseq"
     train_miss = introduce_missing_values(train_data, rate=missing_rate, pattern=pattern)
     val_miss   = introduce_missing_values(val_data,   rate=missing_rate, pattern=pattern)
@@ -390,7 +393,8 @@ if __name__ == "__main__":
  )
     
 
-
+    with open("saved_models/timesnet_model.pkl", "wb") as f:
+        pickle.dump(timesnet_model, f)
 
     n_heads=4
     d_k = 16
@@ -451,6 +455,11 @@ if __name__ == "__main__":
     stride=stride
  )
 
+
+    with open("saved_models/saits_model.pkl", "wb") as f:
+        pickle.dump(saits_model, f)
+    
+
     csdi_model = CSDI(
         n_steps=n_steps,
         n_features=n_feats,
@@ -493,6 +502,9 @@ if __name__ == "__main__":
     windowsize=window_size,
     stride=stride
  )
+    
+    with open("saved_models/csdi_model.pkl", "wb") as f:
+        pickle.dump(csdi_model, f)
 
 
     d_model = 16
@@ -531,4 +543,34 @@ if __name__ == "__main__":
  )
     
 
+    with open("saved_models/timemixer_model.pkl", "wb") as f:
+        pickle.dump(timemixer_model, f)
+
+    # grud_model =GRUD(
+    #     n_steps=window_size,
+    #     n_features=1,
+    #     epochs=100,
+    #     patience=5,
+    #     rnn_hidden_size = config["rnn_hidden_size"],
+    #     batch_size=config["batch_size"],
+    #     optimizer=Adam(lr=config["lr"]),
+    #     # Technical Parameters
+    #     num_workers=4,
+    #     device=None,
+    #     saving_path="gridsearch_results/GRUD",
+    #     model_saving_strategy="better",
+    #     verbose=True
+    # )
+
+
+#     model.fit(train_set=train_set, val_set=val_set)
+#     res = model.predict(test_set)
+#     imputed = res["imputation"]
+
+# # Compute MSE directly on the normalized imputed data
+#     mse = mean_squared_error(
+#         test_X_ori[mask],  # Ground truth (original data)
+#         imputed[mask]     # Imputed values (in normalized scale)
+#     )
+#     print(f"→ MSE: {mse:.4f}")
 
