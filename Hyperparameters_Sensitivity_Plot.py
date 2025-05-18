@@ -8,7 +8,7 @@ def plot_feature_variance_bar(feature_names, variances, model_name="", title="Hy
     
     # Optionally apply log scale to variance values
     if log_scale:
-        log_variances = np.log10(variances + 1e-10)  # avoid log(0)
+        log_variances = np.log10(variances + 1e-10)  # avoid log(0) + add constant 
     else:
         log_variances = variances
 
