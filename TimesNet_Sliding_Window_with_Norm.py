@@ -54,6 +54,44 @@ def process_signal_sliding_window(file_path, window_size=2000, stride=2000//2):
 # =============================================================================
 # Splitting ZIP --> train/val/test CSVs
 # =============================================================================
+def load_and_normalize_files(train_paths, val_paths, test_paths):
+    """
+    Loads FHR data from CSV file paths, fits a StandardScaler on the training data,
+    and returns normalized signals for train, val, and test sets.
+    Each output list contains tuples of (normalized_signal_array, file_id).
+    """
+
+    def read_fhr(path):
+        df = pd.read_csv(path)
+        fhr = df["FHR"].values.astype(float)
+        fhr[fhr == 0] = np.nan  # Treat 0 as missing
+        return fhr
+
+    # 1. Collect all valid FHR values from training files
+    all_train_values = []
+    for path in train_paths:
+        fhr = read_fhr(path)
+        all_train_values.extend(fhr[~np.isnan(fhr)])
+
+    # 2. Fit the scaler on the training values only
+    scaler = StandardScaler()
+    scaler.fit(np.array(all_train_values).reshape(-1, 1))
+
+    # 3. Helper function to normalize a list of files
+    def normalize_files(file_paths):
+        data_list = []
+        for path in file_paths:
+            fhr = read_fhr(path)
+            mask = ~np.isnan(fhr)  # Only normalize valid values
+            fhr_norm = fhr.copy()
+            fhr_norm[mask] = scaler.transform(fhr[mask].reshape(-1, 1)).flatten()
+            data_list.append((fhr_norm, os.path.basename(path)))
+        return data_list
+
+    # 4. Return normalized train/val/test lists of (data, file_id)
+    return normalize_files(train_paths), normalize_files(val_paths), normalize_files(test_paths)
+
+
 def process_zip_sliding_split(zip_path, window_size=100, stride=100//2,
                               test_size=0.2, val_size=0.5, random_state=42):
     results_train, results_val, results_test = [], [], []
@@ -80,19 +118,27 @@ def process_zip_sliding_split(zip_path, window_size=100, stride=100//2,
         print(f"Validation files: {len(val_files)}")
         print(f"Test files: {len(test_files)}")
 
-        for file_list, collector in [(train_files, results_train),
-                                     (val_files, results_val),
-                                     (test_files, results_test)]:
-            for fp in file_list:
+        train_files,val_files,test_files = load_and_normalize_files(train_files,val_files,test_files)
+
+
+        for data_list, collector in [(train_files, results_train),
+                              (val_files,   results_val),
+                              (test_files,  results_test)]:
+            for fhr_data, fid in data_list:
                 try:
-                    for window, fid, st in process_signal_sliding_window(fp, window_size, stride):
-                        collector.append(pd.DataFrame({
-                            "file_id":    [fid],
-                            "start_index":[st],
-                            "fhr":        [list(window)]
-                        }))
+                    if len(fhr_data) >= window_size:
+                        for start in range(0, len(fhr_data) - window_size + 1, stride):
+                            window = fhr_data[start:start + window_size]
+                            collector.append(pd.DataFrame({
+                                "file_id":     [fid],
+                                "start_index": [start],
+                                "fhr":         [list(window)]
+                            }))
+                    else:
+                        print(f"Signal {fid} too short. Skipping.")
                 except Exception as e:
-                    print(f"Error processing {fp}: {e}")
+                    print(f"Error processing {fid}: {e}")
+
 
         os.makedirs('generate_data', exist_ok=True)
         for name, data in [("train", results_train),
@@ -206,8 +252,8 @@ def convert_str_to_array(s):
 # Main
 # =============================================================================
 if __name__ == "__main__":
-    zip_file_path = r'/home/nicoleka/fetal_monitoring_final_project/signals.zip'
-    window_size = 1000
+    zip_file_path = r'/sise/home/mayaroz/signals.zip'
+    window_size = 50
     stride = window_size // 2
 
     # 1) Build sliding-window CSVs
@@ -231,24 +277,26 @@ if __name__ == "__main__":
     train_data = np.array(train_windows).reshape(-1, window_size, n_feats)
     val_data   = np.array(val_windows).reshape(-1, window_size, n_feats)
     test_data  = np.array(test_windows).reshape(-1, window_size, n_feats)
+    print(f'train data shape: {train_data.shape}')
+    print(f'train data shape: {train_data[0].shape}')
 
     # --- normalize all sets ---
-    n_train, n_steps, _ = train_data.shape
-    n_val   = val_data.shape[0]
-    n_test  = test_data.shape[0]
+    # n_train, n_steps, _ = train_data.shape
+    # n_val   = val_data.shape[0]
+    # n_test  = test_data.shape[0]
 
-    train_flat = train_data.reshape(-1, n_feats)
-    val_flat   = val_data.reshape(-1, n_feats)
-    test_flat  = test_data.reshape(-1, n_feats)
+    # train_flat = train_data.reshape(-1, n_feats)
+    # val_flat   = val_data.reshape(-1, n_feats)
+    # test_flat  = test_data.reshape(-1, n_feats)
 
-    scaler = StandardScaler()
-    train_scaled = scaler.fit_transform(train_flat)
-    val_scaled   = scaler.transform(val_flat)
-    test_scaled  = scaler.transform(test_flat)
+    # scaler = StandardScaler()
+    # train_scaled = scaler.fit_transform(train_flat)
+    # val_scaled   = scaler.transform(val_flat)
+    # test_scaled  = scaler.transform(test_flat)
 
-    train_data = train_scaled.reshape(n_train, n_steps, n_feats)
-    val_data   = val_scaled.reshape(n_val,   n_steps, n_feats)
-    test_data  = test_scaled.reshape(n_test,  n_steps, n_feats)
+    # train_data = train_data.reshape(n_train, n_steps, n_feats)
+    # val_data   = val_data.reshape(n_val,   n_steps, n_feats)
+    # test_data  = test_data.reshape(n_test,  n_steps, n_feats)
     # --- end normalization ---
 
     # 3) Introduce missing
@@ -278,14 +326,14 @@ if __name__ == "__main__":
 
     # 5) Hyperparameter search + TimesNet
     param_grid = {
-        "batch_size": [64],
+        "batch_size": [256],
         "n_layers":   [1],
         "top_k":      [1],
-        "d_model":    [128],
+        "d_model":    [256],
         "d_ffn_ratio":[2],
-        "n_kernels":  [1, 3, 5],
+        "n_kernels":  [1],
         "dropout":    [0.3],
-        "lr":         [0.0005]
+        "lr":         [0.001]
     }
     keys, values = zip(*param_grid.items())
     combos = list(itertools.product(*values))
@@ -311,8 +359,8 @@ if __name__ == "__main__":
             try:
                 d_model=cfg["d_model"]
                 model = TimesNet(
-                    n_steps=n_steps,
-                    n_features=n_feats,
+                    n_steps=window_size,
+                    n_features=1,
                     n_layers=cfg["n_layers"],
                     top_k=cfg["top_k"],
                     d_model=d_model,
