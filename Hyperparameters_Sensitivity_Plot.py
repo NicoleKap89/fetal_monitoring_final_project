@@ -3,44 +3,49 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 import numpy as np
 
-def plot_feature_variance_bar(feature_names, variances, model_name="", title="Hyperparameters Sensitivity Analysis via Variance", save_path=None, log_scale=True):
+def plot_feature_std_bar_from_var(feature_names, variances, model_name="", title="Hyperparameters Sensitivity via Std", save_path=None):
+    """
+    Plots a bar chart of standard deviations (sqrt of variance) per feature,
+    with darker color for higher std.
+
+    Args:
+        feature_names (list of str): Hyperparameter names.
+        variances (list of float): Corresponding variance values.
+        model_name (str): Model name to display.
+        title (str): Plot title.
+        save_path (str or None): Path to save the plot.
+    """
     variances = np.array(variances)
-    
-    # Optionally apply log scale to variance values
-    if log_scale:
-        log_variances = np.log10(variances + 1e-10)  # avoid log(0) + add constant 
-    else:
-        log_variances = variances
+    stds = np.sqrt(variances)
 
-    # Invert values so that higher variance (closer to 0 in log) appears darker
-    color_vals = -log_variances
+    # Sort features by std descending
+    sorted_indices = np.argsort(stds)[::-1]
+    sorted_features = np.array(feature_names)[sorted_indices]
+    sorted_stds = stds[sorted_indices]
 
-    # Set color map and normalize color scale
-    cmap = cm.copper
-    norm = Normalize(vmin=min(color_vals), vmax=max(color_vals))
-    colors = [cmap(norm(v)) for v in color_vals]
+    cmap = cm.magma_r  # Reverse copper so darker = higher
+    norm = Normalize(vmin=min(sorted_stds), vmax=max(sorted_stds))
+    colors = [cmap(norm(val)) for val in sorted_stds]
 
-    # Plotting the bar chart
+    # Plotting
     fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar(range(len(feature_names)), log_variances, color=colors)
-    ax.set_xticks(range(len(feature_names)))
-    ax.set_xticklabels(feature_names, rotation=45, ha='right')
-    ax.set_ylabel("Log Variance" if log_scale else "Variance")
-    ax.set_title(f"{title + ' - ' + model_name}" if model_name else title)
+    bars = ax.bar(range(len(sorted_features)), sorted_stds, color=colors)
+    ax.set_xticks(range(len(sorted_features)))
+    ax.set_xticklabels(sorted_features, rotation=45, ha='right')
+    ax.set_ylabel("Standard Deviation")
+    ax.set_title(f"{title} - {model_name}" if model_name else title)
 
-    # Create reversed colorbar (darker at the top)
+    # Bar labels
+    for bar, val in zip(bars, sorted_stds):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{val:.4f}",
+                ha='center', va='bottom', fontsize=8)
+
+    # Colorbar
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax)
-    cbar.ax.invert_yaxis()
-    cbar.set_label("Color ∝ -Log Variance" if log_scale else "Color ∝ -Variance")
+    cbar.set_label("Standard Deviation Scale ")
 
-    # Customize colorbar ticks to show negative log values (i.e., actual log variances)
-    ticks = np.linspace(min(color_vals), max(color_vals), num=5)
-    cbar.set_ticks(ticks)
-    cbar.set_ticklabels([f"{-t:.0f}" for t in ticks])  # Flip sign back for display
-
-    # Save or show the plot
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -48,6 +53,7 @@ def plot_feature_variance_bar(feature_names, variances, model_name="", title="Hy
     else:
         plt.show()
     plt.close()
+
 
 
 # Example usage:
@@ -64,4 +70,7 @@ var = [
 0.000122332,
 8.08E-05
 ]
-plot_feature_variance_bar(feature_name,var,model_name="TimesNet" ,save_path="plot_var_timesnet")
+plot_feature_variance_bar(feature_name,var,model_name="TimesNet" ,save_path="plot_var_timesnet",log_scale=False)
+
+plot_feature_std_bar_from_var(feature_name, var, model_name="TimesNet", save_path="std_plot_timesnet.png")
+
