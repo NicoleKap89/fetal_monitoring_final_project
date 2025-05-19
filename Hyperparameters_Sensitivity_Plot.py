@@ -70,7 +70,6 @@ var = [
 0.000122332,
 8.08E-05
 ]
-plot_feature_variance_bar(feature_name,var,model_name="TimesNet" ,save_path="plot_var_timesnet",log_scale=False)
 
 plot_feature_std_bar_from_var(feature_name, var, model_name="TimesNet", save_path="std_plot_timesnet.png")
 
